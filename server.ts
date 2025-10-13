@@ -124,17 +124,18 @@ evmchains.forEach((chain: ChainType): void => {
     })
 })
 
+// disable erc20 tokens for now
 // Adding ERC20 token contracts to their HOST evm instances
-erc20tokens.forEach((token: any, i: number): void => {
-    if(token.HOSTID) {
-        token = populateConfig(token, getChainByID(evmchains, token.HOSTID))
-    }
+// erc20tokens?.forEach((token: any, i: number): void => {
+//     if(token.HOSTID) {
+//         token = populateConfig(token, getChainByID(evmchains, token.HOSTID))
+//     }
 
-    erc20tokens[i] = token
-    const evm: EVMInstanceAndConfig = evms.get(getChainByID(evmchains, token.HOSTID)?.ID!)!
+//     erc20tokens[i] = token
+//     const evm: EVMInstanceAndConfig = evms.get(getChainByID(evmchains, token.HOSTID)?.ID!)!
 
-    evm?.instance.addERC20Contract(token)
-})
+//     evm?.instance.addERC20Contract(token)
+// })
 
 // POST request for sending tokens or coins
 router.post('/sendToken', captcha.middleware, async (req: any, res: any) => {
@@ -221,7 +222,7 @@ router.post('/sendToken', captcha.middleware, async (req: any, res: any) => {
 
 // GET request for fetching all the chain and token configurations
 router.get('/getChainConfigs', (req: any, res: any) => {
-    const configs: any = [...evmchains, ...erc20tokens]
+    const configs: any = [...evmchains] //, ...erc20tokens] disabled
     res.send({ configs, MAINNET_BALANCE_CHECK_RPC, MAINNET_BALANCE_CHECK_CHAIN_ID })
 })
 
