@@ -1,27 +1,30 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb"
-import { DynamoDBDocumentClient, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb"
-import { Mutex, MutexInterface } from 'async-mutex'
-import { CouponValidity } from "../types"
+import Database from "better-sqlite3";
+import { Mutex, MutexInterface } from "async-mutex";
+import { CouponValidity } from "../types";
 
 export type Coupon = {
-    id: string,
-    faucetConfigId: string,
-    maxLimitAmount: number,
-    consumedAmount: number,
-    expiry: number,
-    amountPerCoupon: number,
-    reset: boolean,
-    skipIpRateLimit?: boolean,
-    skipWalletRateLimit?: boolean,
-    skipCommonTokenDisbursalRateLimit?: boolean,
-}
+    id: string;
+    faucetConfigId: string;
+    maxLimitAmount: number;
+    consumedAmount: number;
+    expiry: number;
+    amountPerCoupon: number;
+    reset: boolean;
+    skipIpRateLimit?: boolean;
+    skipWalletRateLimit?: boolean;
+    skipCommonTokenDisbursalRateLimit?: boolean;
+};
 
 type CouponConfig = {
-    IS_ENABLED: boolean,
-    MAX_LIMIT_CAP: number,
-}
+    IS_ENABLED: boolean;
+    MAX_LIMIT_CAP: number;
+};
 
-function validateCouponData(coupon: any, couponConfig: CouponConfig, ignoreCouponLimitCheck = true): Coupon | undefined {
+function validateCouponData(
+    coupon: any,
+    couponConfig: CouponConfig,
+    ignoreCouponLimitCheck = true
+): Coupon | undefined {
     if (
         coupon.id &&
         coupon.faucetConfigId &&
@@ -30,150 +33,187 @@ function validateCouponData(coupon: any, couponConfig: CouponConfig, ignoreCoupo
         coupon.consumedAmount <= coupon.maxLimitAmount &&
         coupon.expiry > 0
     ) {
-        return coupon
+        return coupon;
     }
-
-    return undefined
+    return undefined;
 }
 
 export class CouponService {
-    private readonly mutex: MutexInterface
-    private readonly documentClient?: DynamoDBDocumentClient
-    private readonly couponConfig: CouponConfig
-    coupons: Map<string, Coupon>
+    private readonly mutex: MutexInterface;
+    private readonly couponConfig: CouponConfig;
+    private readonly db: Database.Database;
+    coupons: Map<string, Coupon>;
 
     constructor(couponConfig: CouponConfig) {
-        this.mutex = new Mutex()
-        this.coupons = new Map<string, Coupon>()
-        this.couponConfig = couponConfig
+        this.mutex = new Mutex();
+        this.coupons = new Map<string, Coupon>();
+        this.couponConfig = couponConfig;
 
-        // Return early if coupon system is disabled
-        if (!couponConfig.IS_ENABLED) return
+        // Early exit if coupon system is disabled
+        if (!couponConfig.IS_ENABLED) {
+            // create in-memory store only
+            this.db = new Database(":memory:");
+            return;
+        }
 
-        const ddbClient = new DynamoDBClient({ region: 'us-east-1' })
-        this.documentClient = DynamoDBDocumentClient.from(ddbClient)
+        // Initialize local DB
+        this.db = new Database("./coupons.db");
 
-        this.syncCoupons()
+        // Create table if not exists
+        this.db
+            .prepare(
+                `CREATE TABLE IF NOT EXISTS coupons (
+                    id TEXT PRIMARY KEY,
+                    faucetConfigId TEXT,
+                    maxLimitAmount INTEGER,
+                    consumedAmount INTEGER,
+                    expiry INTEGER,
+                    amountPerCoupon INTEGER,
+                    reset INTEGER,
+                    skipIpRateLimit INTEGER,
+                    skipWalletRateLimit INTEGER,
+                    skipCommonTokenDisbursalRateLimit INTEGER
+                )`
+            )
+            .run();
 
-        // Syncs coupon between DynamoDB and memory at regular intervals
+        // Initial sync
+        this.syncCoupons();
+
+        // Periodically sync between memory and DB
         setInterval(() => {
-            this.syncCoupons()
-        }, 10_000)
+            this.syncCoupons();
+        }, 10_000);
     }
 
     /**
-     * Syncs coupons in memory with database
-     * 1. Fetches new coupons from database into memory
-     * 2. Remove coupons which were deleted in database from memory
-     * 3. Updates coupon usage limits in database
-     * 4. TODO(raj): Delete expired (or few days after expiry) coupons from database
+     * Syncs coupons in memory with SQLite DB
      */
     private async syncCoupons(): Promise<void> {
-        const params = new ScanCommand({
-            TableName: 'coupons',
-        })
-    
-        const result = await this.documentClient?.send(params)
+        const stmt = this.db.prepare("SELECT * FROM coupons");
+        const dbCoupons = stmt.all() as any[];
 
-        // Required for quick lookup of coupons in DB fetched list
-        const dbItemSet = new Set<string>()
-    
-        // Fetches new coupons from database into memory
-        result?.Items?.forEach((item: Record<string, any>) => {
-            const coupon: Coupon | undefined = validateCouponData(item, this.couponConfig, true)
+        const dbItemSet = new Set<string>();
+
+        // Load coupons from DB
+        dbCoupons.forEach((item) => {
+            const coupon = validateCouponData(item, this.couponConfig, true);
             if (coupon) {
-                dbItemSet.add(coupon.id)
+                dbItemSet.add(coupon.id);
 
-                // Only load new coupons into memory
                 if (this.coupons.get(coupon.id) === undefined || coupon.reset) {
-                    coupon.reset = false
-                    this.coupons.set(coupon.id, coupon)
+                    coupon.reset = false;
+                    this.coupons.set(coupon.id, coupon);
                 }
             } else {
-                console.log(JSON.stringify({
-                    date: new Date(),
-                    type: 'InvalidCouponFetched',
-                    item
-                }))
+                console.log(
+                    JSON.stringify({
+                        date: new Date(),
+                        type: "InvalidCouponFetched",
+                        item,
+                    })
+                );
             }
-        })
+        });
 
-        // Remove coupons which were deleted in database from memory
-        for (const [id, _item] of this.coupons.entries()) {
+        // Remove coupons deleted from DB
+        for (const [id] of this.coupons.entries()) {
             if (!dbItemSet.has(id)) {
-                this.coupons.delete(id)
+                this.coupons.delete(id);
             }
         }
 
-        // Updates coupon usage limits in database
-        await this.batchUpdateCoupons()
+        // Update coupon usage in DB
+        await this.batchUpdateCoupons();
     }
 
-    // Iterates over every coupon in memory and updates database with their `consumedAmount`
+    /**
+     * Batch update all coupons from memory to DB
+     */
     async batchUpdateCoupons(): Promise<void> {
-        this.coupons.forEach(async (couponItem, _id) => {
-            const updateRequest = {
-                TableName: 'coupons',
-                Key: {
-                    id: couponItem.id,
-                },
-                UpdateExpression: 'SET consumedAmount = :consumedAmount, #resetBool = :resetBool',
-                ExpressionAttributeNames: {
-                    // 'reset' is a reserved keyword in DynamoDB
-                    '#resetBool': 'reset'
-                },
-                ExpressionAttributeValues: {
-                    ':consumedAmount': couponItem.consumedAmount,
-                    ':resetBool': couponItem.reset ?? false,
-                },
-            }
+        const stmt = this.db.prepare(
+            `INSERT INTO coupons (
+                id, faucetConfigId, maxLimitAmount, consumedAmount,
+                expiry, amountPerCoupon, reset,
+                skipIpRateLimit, skipWalletRateLimit, skipCommonTokenDisbursalRateLimit
+            ) VALUES (
+                @id, @faucetConfigId, @maxLimitAmount, @consumedAmount,
+                @expiry, @amountPerCoupon, @reset,
+                @skipIpRateLimit, @skipWalletRateLimit, @skipCommonTokenDisbursalRateLimit
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                consumedAmount = excluded.consumedAmount,
+                reset = excluded.reset`
+        );
 
-            const params = new UpdateCommand(updateRequest)
-            await this.documentClient?.send(params)
-        })
-    }  
+        for (const coupon of this.coupons.values()) {
+            stmt.run({
+                ...coupon,
+                reset: coupon.reset ? 1 : 0,
+                skipIpRateLimit: coupon.skipIpRateLimit ? 1 : 0,
+                skipWalletRateLimit: coupon.skipWalletRateLimit ? 1 : 0,
+                skipCommonTokenDisbursalRateLimit: coupon.skipCommonTokenDisbursalRateLimit
+                    ? 1
+                    : 0,
+            });
+        }
+    }
 
-    async consumeCouponAmount(id: string, faucetConfigId: string, amount: number): Promise<CouponValidity> {
-        // Return `true` early, if coupon system is disabled (for debugging)
-        if (!this.couponConfig.IS_ENABLED) return { isValid: true, amount }
+    /**
+     * Consume coupon amount
+     */
+    async consumeCouponAmount(
+        id: string,
+        faucetConfigId: string,
+        amount: number
+    ): Promise<CouponValidity> {
+        if (!this.couponConfig.IS_ENABLED) return { isValid: true, amount };
 
-        const release = await this.mutex.acquire()
+        const release = await this.mutex.acquire();
         try {
-            const coupon = this.coupons.get(id)
-            const couponAmount = coupon?.amountPerCoupon ?? amount
+            const coupon = this.coupons.get(id);
+            const couponAmount = coupon?.amountPerCoupon ?? amount;
+
             if (
                 coupon &&
                 coupon.faucetConfigId === faucetConfigId &&
-                coupon.expiry > (Date.now() / 1000) &&
+                coupon.expiry > Date.now() / 1000 &&
                 coupon.consumedAmount + couponAmount < coupon.maxLimitAmount
             ) {
-                coupon.consumedAmount += couponAmount
-                return { isValid: true, amount: couponAmount}
+                coupon.consumedAmount += couponAmount;
+                return { isValid: true, amount: couponAmount };
             }
-            return { isValid: false, amount: couponAmount}
+
+            return { isValid: false, amount: couponAmount };
         } finally {
-            release()
+            release();
         }
     }
 
+    /**
+     * Reclaim previously consumed coupon amount
+     */
     async reclaimCouponAmount(id: string, amount: number): Promise<void> {
-        const release = await this.mutex.acquire()
+        const release = await this.mutex.acquire();
 
         try {
-            const coupon = this.coupons.get(id)
+            const coupon = this.coupons.get(id);
             if (
                 coupon &&
-                coupon.expiry > (Date.now() / 1000) &&
+                coupon.expiry > Date.now() / 1000 &&
                 coupon.consumedAmount - amount > 0
             ) {
-                coupon.consumedAmount -= amount
+                coupon.consumedAmount -= amount;
             }
         } finally {
-            release()
+            release();
         }
     }
 
+    /**
+     * Get coupon from in-memory cache
+     */
     getCoupon(id: string): Coupon | undefined {
-        return this.coupons.get(id)
+        return this.coupons.get(id);
     }
 }

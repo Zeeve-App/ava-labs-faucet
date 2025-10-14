@@ -1,5 +1,5 @@
 import { CouponService } from '../CouponService/couponService'
-import { MainnetCheckService } from '../mainnetCheckService'
+import { MainnetCheckService } from '../mainnetCheckService-aws'
 import { checkMainnetBalance } from './mainnetBalanceCheck'
 
 export enum PIPELINE_CHECKS {

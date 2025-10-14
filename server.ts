@@ -32,7 +32,7 @@ import {
     checkMainnetBalancePipeline,
     pipelineFailureMessage
 } from './utils/pipelineChecks'
-import { MainnetCheckService } from './mainnetCheckService'
+import { MainnetCheckService } from './mainnetCheckService-aws'
 
 dotenv.config()
 
@@ -53,7 +53,7 @@ const mainnetCheckService = new MainnetCheckService(MAINNET_BALANCE_CHECK_RPC)
 new RateLimiter(app, [GLOBAL_RL], 'global', couponService)
 
 // create array of common token disbursal rate limiter config from evmchains.COMMON_TOKEN_DISBURSAL_RL
-const commonTokenDisbursalRl = [...evmchains, ...erc20tokens].map((chain: ChainType | ERC20Type) => {
+const commonTokenDisbursalRl = [...evmchains].map((chain: ChainType | ERC20Type) => {
     if (chain.COMMON_TOKEN_DISBURSAL_RL) {
         return {
             ID: chain.ID,
@@ -71,13 +71,11 @@ new RateLimiter(app, commonTokenDisbursalRl, 'common_token_disbursal', couponSer
 
 new RateLimiter(app, [
     ...evmchains,
-    ...erc20tokens
 ], 'ip', couponService)
 
 // address rate limiter
 new RateLimiter(app, [
     ...evmchains,
-    ...erc20tokens
 ], 'wallet', couponService, (req: any, res: any) => {
     const addr = req.body?.address
 
